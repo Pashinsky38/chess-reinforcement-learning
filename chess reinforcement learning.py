@@ -7,19 +7,37 @@ import numpy as np
 import random
 from collections import deque
 import os
+import pygame
+import sys
+
+# Initialize Pygame
+pygame.init()
+
+# Colors
+WHITE = (238, 238, 210)
+BLACK = (118, 150, 86)
+HIGHLIGHT = (186, 202, 43)
+TEXT_COLOR = (0, 0, 0)
+BG_COLOR = (49, 46, 43)
+
+# Board settings
+SQUARE_SIZE = 80
+BOARD_SIZE = SQUARE_SIZE * 8
+SIDEBAR_WIDTH = 300
+WINDOW_WIDTH = BOARD_SIZE + SIDEBAR_WIDTH
+WINDOW_HEIGHT = BOARD_SIZE
 
 class ChessNet(nn.Module):
     """Neural network to evaluate chess positions"""
     def __init__(self):
         super(ChessNet, self).__init__()
-        # Input: 8x8x12 (piece positions) + other features
         self.conv1 = nn.Conv2d(12, 64, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
         self.conv3 = nn.Conv2d(128, 128, kernel_size=3, padding=1)
         
         self.fc1 = nn.Linear(128 * 8 * 8, 512)
         self.fc2 = nn.Linear(512, 256)
-        self.fc3 = nn.Linear(256, 1)  # Value head - evaluates position
+        self.fc3 = nn.Linear(256, 1)
         
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(0.3)
@@ -46,7 +64,7 @@ class ChessRLAgent:
         
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
         self.gamma = gamma
-        self.epsilon = 1.0  # Exploration rate
+        self.epsilon = 1.0
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.995
         
@@ -94,15 +112,12 @@ class ChessRLAgent:
         if not legal_moves:
             return None
         
-        # Exploration: random move
         if training and random.random() < self.epsilon:
             return random.choice(legal_moves)
         
-        # Exploitation: best move according to model
         move_values = []
         for move in legal_moves:
             value = self.evaluate_move(board, move)
-            # Negate value if it's opponent's turn after this move
             move_values.append(-value if board.turn == chess.WHITE else value)
         
         best_idx = np.argmax(move_values)
@@ -133,7 +148,6 @@ class ChessRLAgent:
             loss.backward()
             self.optimizer.step()
         
-        # Decay epsilon
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
     
@@ -162,85 +176,250 @@ class ChessRLAgent:
         else:
             print(f"No model found at {filepath}")
 
-class ChessTrainer:
+class ChessGUI:
     def __init__(self, agent, engine_path=None):
         self.agent = agent
-        self.engine = None
-        self.engine_path = engine_path
+        self.board = chess.Board()
+        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        pygame.display.set_caption("Chess RL Agent Training")
         
-        # Try to load Stockfish if path provided
+        self.font = pygame.font.Font(None, 28)
+        self.title_font = pygame.font.Font(None, 36)
+        self.small_font = pygame.font.Font(None, 22)
+        
+        self.engine = None
         if engine_path and os.path.exists(engine_path):
             self.engine = chess.engine.SimpleEngine.popen_uci(engine_path)
+        
+        self.last_move = None
+        self.game_count = 0
+        self.wins = 0
+        self.losses = 0
+        self.draws = 0
+        self.current_skill_level = 1
+        self.states = []
+        self.thinking = False
+        
+        # Load piece images
+        self.load_pieces()
     
-    def play_against_engine(self, engine_skill_level=1):
-        """Play a game against chess engine"""
-        board = chess.Board()
-        states = []
+    def load_pieces(self):
+        """Load chess piece images"""
+        self.pieces = {}
+        piece_names = ['P', 'N', 'B', 'R', 'Q', 'K', 'p', 'n', 'b', 'r', 'q', 'k']
         
-        if self.engine:
-            self.engine.configure({"Skill Level": engine_skill_level})
+        # Create simple colored circles for pieces (you can replace with actual images)
+        for piece_name in piece_names:
+            self.pieces[piece_name] = self.create_piece_surface(piece_name)
+    
+    def create_piece_surface(self, piece_name):
+        """Create a simple piece representation"""
+        surface = pygame.Surface((SQUARE_SIZE, SQUARE_SIZE), pygame.SRCALPHA)
         
-        while not board.is_game_over():
-            # Agent's turn (White)
-            if board.turn == chess.WHITE:
-                state = self.agent.board_to_tensor(board)
-                move = self.agent.select_move(board, training=True)
+        is_white = piece_name.isupper()
+        color = (255, 255, 255) if is_white else (0, 0, 0)
+        outline_color = (0, 0, 0) if is_white else (255, 255, 255)
+        
+        # Draw circle
+        center = (SQUARE_SIZE // 2, SQUARE_SIZE // 2)
+        pygame.draw.circle(surface, color, center, 25)
+        pygame.draw.circle(surface, outline_color, center, 25, 3)
+        
+        # Draw piece letter
+        font = pygame.font.Font(None, 40)
+        text = font.render(piece_name.upper(), True, outline_color)
+        text_rect = text.get_rect(center=center)
+        surface.blit(text, text_rect)
+        
+        return surface
+    
+    def draw_board(self):
+        """Draw the chess board"""
+        for row in range(8):
+            for col in range(8):
+                color = WHITE if (row + col) % 2 == 0 else BLACK
+                
+                # Highlight last move
+                if self.last_move:
+                    from_square = self.last_move.from_square
+                    to_square = self.last_move.to_square
+                    from_row, from_col = 7 - (from_square // 8), from_square % 8
+                    to_row, to_col = 7 - (to_square // 8), to_square % 8
+                    
+                    if (row, col) == (from_row, from_col) or (row, col) == (to_row, to_col):
+                        color = HIGHLIGHT
+                
+                pygame.draw.rect(self.screen, color, 
+                               (col * SQUARE_SIZE, row * SQUARE_SIZE, SQUARE_SIZE, SQUARE_SIZE))
+        
+        # Draw coordinates
+        coord_font = pygame.font.Font(None, 20)
+        for i in range(8):
+            # Files (a-h)
+            file_text = coord_font.render(chr(97 + i), True, TEXT_COLOR)
+            self.screen.blit(file_text, (i * SQUARE_SIZE + SQUARE_SIZE - 15, BOARD_SIZE - 15))
+            
+            # Ranks (1-8)
+            rank_text = coord_font.render(str(8 - i), True, TEXT_COLOR)
+            self.screen.blit(rank_text, (5, i * SQUARE_SIZE + 5))
+    
+    def draw_pieces(self):
+        """Draw all pieces on the board"""
+        for square in chess.SQUARES:
+            piece = self.board.piece_at(square)
+            if piece:
+                row = 7 - (square // 8)
+                col = square % 8
+                piece_symbol = piece.symbol()
+                
+                piece_surface = self.pieces.get(piece_symbol)
+                if piece_surface:
+                    self.screen.blit(piece_surface, (col * SQUARE_SIZE, row * SQUARE_SIZE))
+    
+    def draw_sidebar(self):
+        """Draw the information sidebar"""
+        sidebar_x = BOARD_SIZE
+        pygame.draw.rect(self.screen, BG_COLOR, (sidebar_x, 0, SIDEBAR_WIDTH, WINDOW_HEIGHT))
+        
+        y_offset = 20
+        
+        # Title
+        title = self.title_font.render("Chess RL Agent", True, (255, 255, 255))
+        self.screen.blit(title, (sidebar_x + 20, y_offset))
+        y_offset += 60
+        
+        # Stats
+        stats = [
+            f"Game: {self.game_count}",
+            f"Wins: {self.wins}",
+            f"Losses: {self.losses}",
+            f"Draws: {self.draws}",
+            "",
+            f"Epsilon: {self.agent.epsilon:.3f}",
+            f"Bot Level: {self.current_skill_level}",
+            "",
+            f"To Move: {'White (AI)' if self.board.turn == chess.WHITE else 'Black (Bot)'}",
+        ]
+        
+        for stat in stats:
+            text = self.font.render(stat, True, (255, 255, 255))
+            self.screen.blit(text, (sidebar_x + 20, y_offset))
+            y_offset += 35
+        
+        # Last move
+        if self.last_move:
+            y_offset += 10
+            move_text = self.font.render("Last Move:", True, (255, 255, 255))
+            self.screen.blit(move_text, (sidebar_x + 20, y_offset))
+            y_offset += 30
+            
+            move_str = self.last_move.uci()
+            move_display = self.font.render(move_str, True, (100, 255, 100))
+            self.screen.blit(move_display, (sidebar_x + 20, y_offset))
+        
+        # Thinking indicator
+        if self.thinking:
+            y_offset = WINDOW_HEIGHT - 50
+            thinking_text = self.small_font.render("Thinking...", True, (255, 255, 100))
+            self.screen.blit(thinking_text, (sidebar_x + 20, y_offset))
+    
+    def play_game(self, delay=500):
+        """Play one game with visual display"""
+        self.board = chess.Board()
+        self.last_move = None
+        self.states = []
+        clock = pygame.time.Clock()
+        
+        while not self.board.is_game_over():
+            # Handle events
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return None
+            
+            # Draw everything
+            self.screen.fill(BG_COLOR)
+            self.draw_board()
+            self.draw_pieces()
+            self.draw_sidebar()
+            pygame.display.flip()
+            
+            # Make move
+            if self.board.turn == chess.WHITE:
+                # AI's turn
+                self.thinking = True
+                self.draw_sidebar()
+                pygame.display.flip()
+                
+                state = self.agent.board_to_tensor(self.board)
+                move = self.agent.select_move(self.board, training=True)
                 
                 if move is None:
                     break
                 
-                board.push(move)
-                states.append((state, move, board.copy()))
+                self.board.push(move)
+                self.last_move = move
+                self.states.append((state, move, self.board.copy()))
+                self.thinking = False
                 
-            # Engine's turn (Black)
             else:
+                # Engine's turn
+                self.thinking = True
+                self.draw_sidebar()
+                pygame.display.flip()
+                
                 if self.engine:
-                    result = self.engine.play(board, chess.engine.Limit(time=0.1))
-                    board.push(result.move)
+                    self.engine.configure({"Skill Level": self.current_skill_level})
+                    result = self.engine.play(self.board, chess.engine.Limit(time=0.1))
+                    self.board.push(result.move)
+                    self.last_move = result.move
                 else:
-                    # Random move if no engine
-                    legal_moves = list(board.legal_moves)
+                    legal_moves = list(self.board.legal_moves)
                     if legal_moves:
-                        board.push(random.choice(legal_moves))
+                        move = random.choice(legal_moves)
+                        self.board.push(move)
+                        self.last_move = move
+                
+                self.thinking = False
+            
+            # Delay between moves
+            pygame.time.delay(delay)
+            clock.tick(60)
         
-        # Determine reward
-        result = board.result()
-        if result == "1-0":  # Agent won
+        # Game over - determine result
+        result = self.board.result()
+        if result == "1-0":
             reward = 1.0
-        elif result == "0-1":  # Agent lost
+            self.wins += 1
+        elif result == "0-1":
             reward = -1.0
-        else:  # Draw
+            self.losses += 1
+        else:
             reward = 0.0
+            self.draws += 1
         
         # Store experiences
-        for i, (state, move, board_state) in enumerate(states):
+        for i, (state, move, board_state) in enumerate(self.states):
             next_state = self.agent.board_to_tensor(board_state)
-            done = (i == len(states) - 1)
+            done = (i == len(self.states) - 1)
             self.agent.remember(state, move, reward, next_state, done)
         
-        return result, reward
+        return result
     
-    def train(self, episodes=1000, update_target_every=10, save_every=100):
-        """Train the agent"""
+    def train_with_visualization(self, episodes=100, update_target_every=10, save_every=50):
+        """Train the agent with live visualization"""
         print(f"Training on {self.agent.device}")
         print(f"Engine: {'Available' if self.engine else 'Not available (using random moves)'}")
         
-        wins, losses, draws = 0, 0, 0
-        
         for episode in range(episodes):
-            # Gradually increase difficulty
-            skill_level = min(1 + episode // 100, 20)
+            self.game_count = episode + 1
+            self.current_skill_level = min(1 + episode // 10, 20)
             
-            result, reward = self.play_against_engine(engine_skill_level=skill_level)
+            result = self.play_game(delay=300)  # 300ms delay between moves
             
-            if result == "1-0":
-                wins += 1
-            elif result == "0-1":
-                losses += 1
-            else:
-                draws += 1
+            if result is None:  # User closed window
+                break
             
-            # Train on experiences
+            # Train
             self.agent.replay()
             
             # Update target network
@@ -251,16 +430,30 @@ class ChessTrainer:
             if episode % save_every == 0 and episode > 0:
                 self.agent.save_model(f"chess_model_ep{episode}.pt")
             
-            # Print progress
-            if episode % 10 == 0:
-                print(f"Episode {episode}/{episodes} | "
-                      f"W: {wins} L: {losses} D: {draws} | "
-                      f"Epsilon: {self.agent.epsilon:.3f} | "
-                      f"Skill Level: {skill_level}")
-                wins, losses, draws = 0, 0, 0
+            # Show game over screen briefly
+            self.screen.fill(BG_COLOR)
+            self.draw_board()
+            self.draw_pieces()
+            self.draw_sidebar()
+            
+            # Game over text
+            game_over_font = pygame.font.Font(None, 48)
+            if result == "1-0":
+                text = game_over_font.render("AI WINS!", True, (0, 255, 0))
+            elif result == "0-1":
+                text = game_over_font.render("AI LOSES", True, (255, 0, 0))
+            else:
+                text = game_over_font.render("DRAW", True, (255, 255, 0))
+            
+            text_rect = text.get_rect(center=(BOARD_SIZE // 2, BOARD_SIZE // 2))
+            self.screen.blit(text, text_rect)
+            pygame.display.flip()
+            pygame.time.delay(1500)
         
         if self.engine:
             self.engine.quit()
+        
+        pygame.quit()
 
 # Example usage
 if __name__ == "__main__":
@@ -270,13 +463,14 @@ if __name__ == "__main__":
     # Optional: Load existing model
     # agent.load_model("chess_model_ep1000.pt")
     
-    # Create trainer
+    # Create GUI trainer
     # Replace with your Stockfish path, or leave None for random opponent
-    stockfish_path = None  # e.g., "/usr/local/bin/stockfish" or "stockfish.exe"
-    trainer = ChessTrainer(agent, engine_path=stockfish_path)
+    stockfish_path = None  # e.g., "/usr/local/bin/stockfish" or "C:/stockfish/stockfish.exe"
     
-    # Train
-    trainer.train(episodes=1000)
+    gui = ChessGUI(agent, engine_path=stockfish_path)
+    
+    # Train with visualization
+    gui.train_with_visualization(episodes=100)
     
     # Save final model
     agent.save_model("chess_model_final.pt")
